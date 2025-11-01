@@ -1,0 +1,24 @@
+{
+  "name": "resilience-patterns-nodejs",
+  "version": "1.0.0",
+  "description": "Demonstrates resilience patterns in Node.js",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "nodejs",
+    "resilience",
+    "circuit-breaker",
+    "retry",
+    "exponential-backoff",
+    "jitter",
+    "design-patterns"
+  ],
+  "author": "Raghu Raghavan",
+  "license": "ISC",
+  "dependencies": {
+    "cockatiel": "^3.2.1"
+  }
+}
