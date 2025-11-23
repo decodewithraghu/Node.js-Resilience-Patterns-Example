@@ -5,7 +5,10 @@
   "main": "src/app.js",
   "scripts": {
     "start": "node src/app.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start:prod": "cross-env NODE_ENV=production node src/app.js",
+    "test": "cross-env NODE_ENV=test jest",
+    "test:watch": "cross-env NODE_ENV=test jest --watch",
+    "test:coverage": "cross-env NODE_ENV=test jest --coverage"
   },
   "keywords": [
     "nodejs",
@@ -19,6 +22,11 @@
   "author": "Raghu Raghavan",
   "license": "ISC",
   "dependencies": {
-    "cockatiel": "^3.2.1"
+    "cockatiel": "^3.2.1",
+    "cross-env": "^7.0.3",
+    "winston": "^3.11.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
   }
 }
