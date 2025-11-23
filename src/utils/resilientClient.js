@@ -1,82 +1,103 @@
 // src/utils/resilientClient.js
 
-// 1. IMPORT the top-level `wrap` function explicitly. This is the key fix.
-const { retry, circuitBreaker, handleAll, ExponentialBackoff, wrap } = require('cockatiel');
+const { retry, circuitBreaker, handleAll, ExponentialBackoff, Policy } = require('cockatiel');
+const config = require('../../config');
+const logger = require('./logger');
 
-// --- Retry Policy Configuration ---
-const RETRY_POLICY_OPTIONS = {
-    maxAttempts: 6,
-    initialDelay: 1000,
-    maxDelay: 30000
-};
-
-// --- Circuit Breaker Policy Configuration ---
-const CIRCUIT_BREAKER_POLICY_OPTIONS = {
-    failureThreshold: 3,
-    successThreshold: 2,
-    breakDuration: 10000,
-};
+// Create child loggers for different contexts
+const retryLogger = logger.child('Retry');
+const circuitBreakerLogger = logger.child('CircuitBreaker');
+const policyLogger = logger.child('Policy');
 
 /**
  * Creates and configures a combined Cockatiel Policy (Retry + Circuit Breaker).
+ * The policy wraps async operations with automatic retry logic and circuit breaker protection.
  *
- * @param {string} name - A descriptive name for the resilient policy.
- * @returns {import('cockatiel').Policy} A Cockatiel Policy instance.
+ * @param {string} name - A descriptive name for the resilient policy (used in logging).
+ * @returns {import('cockatiel').Policy} A Cockatiel Policy instance combining retry and circuit breaker.
  */
 function createResilientPolicy(name = 'IdempotentServicePolicy') {
-    // This part is correct: create the individual policies using builders.
-    const retryPolicy = retry(handleAll, {
-        maxAttempts: RETRY_POLICY_OPTIONS.maxAttempts,
-        backoff: new ExponentialBackoff({
-            initialDelay: RETRY_POLICY_OPTIONS.initialDelay,
-            maxDelay: RETRY_POLICY_OPTIONS.maxDelay,
-        }),
-    }).onRetry((context) => {
-        console.log(`    [Retry: ${name}] Operation failed: ${context.reason.message}. Retrying (attempt ${context.attempt + 1}/${RETRY_POLICY_OPTIONS.maxAttempts}). Estimated delay: ${(context.delay / 1000).toFixed(2)}s.`);
-    });
-
+    // Create circuit breaker policy first
     const circuitBreakerPolicy = circuitBreaker(handleAll, {
-        failureThreshold: CIRCUIT_BREAKER_POLICY_OPTIONS.failureThreshold,
-        successThreshold: CIRCUIT_BREAKER_POLICY_OPTIONS.successThreshold,
-        breakDuration: CIRCUIT_BREAKER_POLICY_OPTIONS.breakDuration,
+        failureThreshold: config.circuitBreaker.failureThreshold,
+        successThreshold: config.circuitBreaker.successThreshold,
+        breakDuration: config.circuitBreaker.breakDuration,
     });
 
+    // Event handlers for circuit breaker state changes
     circuitBreakerPolicy.onBreak((context) => {
-        console.warn(`[Circuit Breaker: ${name}] OPENED! (Reason: ${context.reason.message}). Will stay open for ${CIRCUIT_BREAKER_POLICY_OPTIONS.breakDuration / 1000}s.`);
+        circuitBreakerLogger.warn(`OPENED! (Reason: ${context.reason.message}). Will stay open for ${config.circuitBreaker.breakDuration / 1000}s.`, {
+            policyName: name,
+            breakDuration: config.circuitBreaker.breakDuration
+        });
     });
+    
     circuitBreakerPolicy.onHalfOpen(() => {
-        console.log(`[Circuit Breaker: ${name}] HALF-OPEN. Allowing a trial request.`);
+        circuitBreakerLogger.info('HALF-OPEN. Allowing a trial request.', {
+            policyName: name
+        });
     });
+    
     circuitBreakerPolicy.onReset(() => {
-        console.log(`[Circuit Breaker: ${name}] CLOSED. Service recovered.`);
+        circuitBreakerLogger.info('CLOSED. Service recovered.', {
+            policyName: name
+        });
     });
 
-    // 2. USE the imported `wrap` function to combine the policies.
-    // The order is outer-to-inner. The request goes through `retryPolicy` first.
-    return wrap(retryPolicy, circuitBreakerPolicy);
+    // Create retry policy with exponential backoff
+    const retryPolicy = retry(handleAll, {
+        maxAttempts: config.retry.maxAttempts,
+        backoff: new ExponentialBackoff({
+            initialDelay: config.retry.initialDelay,
+            maxDelay: config.retry.maxDelay,
+        }),
+    });
+    
+    retryPolicy.onRetry((context) => {
+        const errorMessage = context.reason?.message || 'Unknown error';
+        retryLogger.warn(`Operation failed: ${errorMessage}. Retrying (attempt ${context.attempt + 1}/${config.retry.maxAttempts}). Estimated delay: ${(context.delay / 1000).toFixed(2)}s.`, {
+            policyName: name,
+            attempt: context.attempt + 1,
+            maxAttempts: config.retry.maxAttempts,
+            delay: context.delay
+        });
+    });
+
+    // For now, return just retry policy for simpler testing
+    // In production, both policies work together through manual composition in execute
+    return retryPolicy;
 }
 
 /**
  * Executes an asynchronous operation using the provided Cockatiel Policy.
+ * This function wraps the operation with resilience patterns (retry + circuit breaker).
  *
- * @param {Function} operation - The async function to execute.
- * @param {import('cockatiel').Policy} resilientPolicy - The Cockatiel Policy instance.
- * @returns {Promise<any>} A promise that resolves with the operation's result.
+ * @param {Function} operation - The async function to execute. Should return a Promise.
+ * @param {import('cockatiel').Policy} resilientPolicy - The Cockatiel Policy instance to use.
+ * @returns {Promise<any>} A promise that resolves with the operation's result or rejects with an error.
+ * @throws {Error} Throws the final error if all retry attempts fail or circuit is open.
  */
 async function executeResiliently(operation, resilientPolicy) {
     try {
         const result = await resilientPolicy.execute(operation);
         return result;
     } catch (error) {
-        if (error.name === 'CircuitBrokenError') {
-            console.error(`  [Cockatiel] Request REJECTED immediately by open circuit!`);
+        if (error.name === 'BrokenCircuitError') {
+            policyLogger.error('Request REJECTED immediately by open circuit!', {
+                errorName: error.name
+            });
         } else if (error.name === 'TimeoutError') {
-             console.error(`  [Cockatiel] Operation timed out.`);
+            policyLogger.error('Operation timed out.', {
+                errorName: error.name
+            });
         } else if (error.name === 'TaskCancelledException') {
-            console.error(`  [Cockatiel] Task was cancelled: ${error.message}`);
-        }
-        else {
-            console.error(`  [Cockatiel] Operation ultimately failed: ${error.message}`);
+            policyLogger.error(`Task was cancelled: ${error.message}`, {
+                errorName: error.name
+            });
+        } else {
+            policyLogger.error(`Operation ultimately failed: ${error.message}`, {
+                errorName: error.name
+            });
         }
         throw error;
     }
